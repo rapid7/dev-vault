@@ -10,7 +10,7 @@ rescue LoadError
 end
 
 module Dev
-  module Vault
+  class Vault
     ##
     # Tools to fetch and extract Hashicorp's platform builds of Vault
     ##

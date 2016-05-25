@@ -9,12 +9,18 @@ task :fetch do
   Dev::Vault::Build.fetch
 end
 
-task :run do
+task :dev do
   Dev::Vault.run
-end
-
-task :wait do
   Dev::Vault.wait
 end
 
-task :default => [:run, :wait]
+task :nodev do
+  Dev::Vault.run(:dev => false, :port => Dev::Vault::RANDOM_PORT)
+  Dev::Vault.wait
+end
+
+task :block do
+  Dev::Vault.block
+end
+
+task :default => [:dev, :block]

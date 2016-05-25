@@ -21,3 +21,5 @@ RescueModifier:
   Enabled: false
 SpaceInsideStringInterpolation:
   Enabled: false
+Style/Alias:
+  Enabled: false

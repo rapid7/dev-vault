@@ -1,5 +1,5 @@
 module Dev
-  module Vault
+  class Vault
     VERSION = '0.5.2'.freeze
   end
 end

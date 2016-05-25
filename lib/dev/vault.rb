@@ -1,125 +1,177 @@
 require_relative './vault/version'
+require_relative './vault/helpers'
 
 require 'json'
-require 'net/http'
 require 'securerandom'
+require 'tempfile'
+require 'vault'
 
 module Dev
   ##
   # Helpers to fetch and run a development-instance of vault
   ##
-  module Vault
-    class << self
-      def bindir
-        File.expand_path('../../bin', __dir__)
-      end
+  class Vault
+    extend Helpers
 
-      def architecture
-        case RUBY_PLATFORM
-        when /x86_64/ then 'amd64'
-        when /amd64/ then 'amd64'
-        when /386/ then '386'
-        when /arm/ then 'arm'
-        else raise NameError, "Unable to detect system architecture for #{RUBY_PLATFORM}"
-        end
-      end
+    DEFAULT_PORT = 8200
+    RANDOM_PORT = 'RANDOM_PORT'.freeze
 
-      def platform
-        case RUBY_PLATFORM
-        when /darwin/ then 'darwin'
-        when /freebsd/ then 'freebsd'
-        when /linux/ then 'linux'
-        else raise NameError, "Unable to detect system platfrom for #{RUBY_PLATFORM}"
-        end
-      end
+    attr_reader :command
+    attr_reader :config
+    attr_reader :output
 
-      def bin
-        File.join(bindir, "vault_#{VERSION}_#{platform}_#{architecture}")
-      end
+    attr_reader :dev
+    alias_method :dev?, :dev
 
-      def token
-        @token ||= SecureRandom.uuid
-      end
+    attr_reader :client
+    attr_reader :port
 
-      def mount(name)
-        post = Net::HTTP::Post.new("/v1/sys/mounts/#{name}")
-        post.body = JSON.generate(:type => name)
-        post['X-Vault-Token'] = token
+    attr_reader :keys
+    attr_reader :token
 
-        Net::HTTP.new('localhost', 8200).request(post)
-      end
+    def initialize(**options)
+      @dev = options.fetch(:dev, true)
+      @token = dev ? SecureRandom.uuid : options[:token]
 
-      def output(arg = nil)
-        @thread[:output] = arg unless @thread.nil? || arg.nil?
-        @thread[:output] unless @thread.nil?
-      end
-
-      def run
-        puts "Starting #{bin}"
-
-        ## Fork a child process for Vault from a thread
-        @thread = Thread.new do
-          IO.popen(%(#{bin} server -dev -dev-root-token-id="#{token}"), 'r+') do |io|
-            Thread.current[:process] = io.pid
-            puts "Started #{bin} (#{io.pid})"
-
-            ## Stream output
-            loop do
-              break if io.eof?
-              chunk = io.readpartial(1024)
-
-              if Thread.current[:output]
-                Thread.current[:output].write(chunk)
-                Thread.current[:output].flush
+      @port = case options[:port]
+              when Fixnum then options[:port]
+              when RANDOM_PORT then 10_000 + rand(10_000)
+              else DEFAULT_PORT
               end
-            end
-          end
-        end
 
-        @thread[:output] = $stdout
+      @command = [self.class.bin, 'server']
+      @command.push(*['-dev', "-dev-root-token-id=#{token}", "-dev-listen-address=127.0.0.1:#{port}"]) if dev?
+      @output = options.fetch(:output, $stdout)
 
-        ## Wait for the service to become ready
-        loop do
-          begin
-            break if @stopped
+      ## Non-development mode server
+      unless dev?
+        @config = Tempfile.new('dev-vault')
+        @command << "-config=#{config.path}"
+      end
 
-            status = Net::HTTP.get('localhost', '/v1/sys/seal-status', 8200)
-            status = JSON.parse(status, :symbolize_names => true)
+      @client = ::Vault::Client.new(:address => "http://localhost:#{port}",
+                                    :token => token)
+    end
 
-            if status[:sealed]
-              puts 'Waiting for Vault HTTP API to be ready'
-              sleep 1
+    ## Logging helper
+    def log(*message)
+      return unless output.is_a?(IO)
 
-              next
-            end
+      output.write(message.join(' ') + "\n")
+      output.flush
+    end
 
-            puts 'Vault HTTP API is ready!'
-            break
+    ##
+    # Write configuration to tempfile
+    ##
+    def configure
+      raise 'Cannot configure a Vault server in development mode' if dev?
 
-          rescue Errno::ECONNREFUSED, JSON::ParseError
-            puts 'Waiting for Vault HTTP API to be ready'
-            sleep 1
+      config.write(
+        JSON.pretty_generate(
+          :backend => {
+            :inmem => {}
+          },
+          :listener => {
+            :tcp => {
+              :address => "127.0.0.1:#{port}",
+              :tls_disable => 'true'
+            }
+          }
+        )
+      )
+
+      config.rewind
+    end
+
+    ##
+    # Helper to initialize a non-development Vault server and store the new token
+    ##
+    def init(**options)
+      raise 'Cannot initialize a Vault server in development mode' if dev?
+
+      options[:shares] ||= 1
+      options[:threshold] ||= 1
+
+      result = client.sys.init(options)
+
+      ## Capture the new keys and token
+      @keys = result.keys
+      @token = result.root_token
+    end
+
+    def run
+      configure unless dev?
+      log "Running #{command.join(' ')}"
+
+      ## Fork a child process for Vault from a thread
+      @stopped = false
+      @thread = Thread.new do
+        IO.popen(command + [:err => [:child, :out]], 'r+') do |io|
+          Thread.current[:process] = io.pid
+
+          ## Stream output
+          loop do
+            break if io.eof?
+            chunk = io.readpartial(1024)
+
+            next unless output.is_a?(IO)
+            output.write(chunk)
+            output.flush
           end
         end
       end
 
-      def wait
-        @thread.join unless @thread.nil?
-      end
+      self
+    end
 
-      def stop
-        unless @thread.nil?
-          unless @thread[:process].nil?
-            puts "Stop #{bin} (#{@thread[:process]})"
-            Process.kill('INT', @thread[:process])
-          end
+    ##
+    # Wait for the service to become ready
+    ##
+    def wait
+      loop do
+        break if @stopped || @thread.nil? || !@thread.alive?
 
-          @thread.join
+        begin
+          client.sys.init_status
+        rescue ::Vault::HTTPConnectionError
+          log 'Waiting for Vault HTTP API to be ready'
+          sleep 1
+
+          next
         end
 
-        @thread = nil
-        @stopped = true
+        if dev? && !client.sys.init_status.initialized?
+          log 'Waiting for Vault development server to initialize'
+          sleep 1
+
+          next
+        end
+
+        log 'Vault is ready!'
+        break
       end
+
+      self
+    end
+
+    def block
+      @thread.join unless @thread.nil?
+    end
+
+    def stop
+      unless @thread.nil?
+        unless @thread[:process].nil?
+          log "Stop #{command.join(' ')} (#{@thread[:process]})"
+          Process.kill('TERM', @thread[:process])
+        end
+
+        @thread.join
+      end
+
+      config.unlink unless dev?
+      @thread = nil
+      @stopped = true
     end
   end
 end
