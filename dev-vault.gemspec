@@ -5,7 +5,7 @@ require 'dev/vault/version'
 
 Gem::Specification.new do |spec|
   spec.name          = 'dev-vault'
-  spec.version       = Dev::Vault::VERSION
+  spec.version       = "#{Dev::Vault::VERSION}.#{Dev::Vault::RELEASE}"
   spec.authors       = ['John Manero']
   spec.email         = ['jmanero@rapid7.com']
 
