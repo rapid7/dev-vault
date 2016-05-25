@@ -40,10 +40,8 @@ require 'dev/vault'
 
 RSpec.configure do |config|
   config.before(:suite) do
-    Dev::Vault.run
-
-    ## Mute output once the vault server is running
-    Dev::Vault.output(false)
+    ## Start Vault with logging suppressed
+    Dev::Vault.run(:output => false)
   end
 
   config.after(:suite) do
@@ -53,6 +51,31 @@ RSpec.configure do |config|
   ## ...
 end
 ```
+
+For more advanced test scenarios involving `init`, `seal`, and `unseal` operations, start a non-dev Vault instance with the `inmem` storage provider:
+
+```ruby
+require 'dev/vault'
+
+RSpec.describe 'Some Vault Test'
+  subject(:vault) do
+    Dev::Vault.new(
+      :dev => false,
+      :port => Dev::Vault::RANDOM_PORT,
+      :output => false
+    ).run.wait
+  end
+
+  after { vault.stop }
+
+  it 'initializes vault' do
+    vault.client.sys.init
+
+    expect(vault.client.sys.init_status.initialized?).to be true
+  end
+```
+
+This test suite will create and destroy un-initialized vault instances for each case.
 
 ## Contributing
 
